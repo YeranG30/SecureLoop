@@ -24,7 +24,7 @@ export function retrieveBasket () {
 
     BasketModel.findOne({
       where: {
-        id: id,
+        id,
         UserId: user.data.id
       },
       include: [
@@ -35,21 +35,21 @@ export function retrieveBasket () {
         }
       ]
     })
-    .then((basket: BasketModel | null) => {
-      challengeUtils.solveIf(challenges.basketAccessChallenge, () => {
-        return true // Challenge gets solved if the previous insecure access was possible
-      })
+      .then((basket: BasketModel | null) => {
+        challengeUtils.solveIf(challenges.basketAccessChallenge, () => {
+          return true // Challenge gets solved if the previous insecure access was possible
+        })
 
-      if (basket?.Products?.length) {
-        for (let i = 0; i < basket.Products.length; i++) {
-          basket.Products[i].name = req.__(basket.Products[i].name)
+        if (basket?.Products?.length) {
+          for (let i = 0; i < basket.Products.length; i++) {
+            basket.Products[i].name = req.__(basket.Products[i].name)
+          }
         }
-      }
 
-      res.json(utils.queryResultToJson(basket))
-    })
-    .catch((error: Error) => {
-      next(error)
-    })
+        res.json(utils.queryResultToJson(basket))
+      })
+      .catch((error: Error) => {
+        next(error)
+      })
   }
 }
