@@ -97,7 +97,159 @@ export function placeOrder () {
               doc.moveDown()
               totalPrice += itemTotal
               totalPoints += itemBonus
+            }export function placeOrder () {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const id = req.params.id
+    const sequelize = BasketModel.sequelize
+
+    try {
+      await sequelize?.transaction(async (t) => {
+        const basket = await BasketModel.findOne({
+          where: { id },
+          include: [{ model: ProductModel, paranoid: false, as: 'Products' }],
+          transaction: t,
+          lock: t.LOCK.UPDATE
+        })
+
+        if (!basket) throw new Error(`Basket with id=${id} does not exist.`)
+
+        const customer = security.authenticatedUsers.from(req)
+        const email = customer?.data?.email ?? ''
+        const orderId = security.hash(email).slice(0, 4) + '-' + utils.randomHexString(16)
+        const pdfFile = `order_${orderId}.pdf`
+        const doc = new PDFDocument()
+        const date = new Date().toJSON().slice(0, 10)
+        const fileWriter = doc.pipe(fs.createWriteStream(path.join('ftp/', pdfFile)))
+
+        let totalPrice = 0
+        const basketProducts: Product[] = []
+        let totalPoints = 0
+
+        for (const { BasketItem, price, deluxePrice, name, id: productId } of basket.Products ?? []) {
+          if (BasketItem) {
+            challengeUtils.solveIf(challenges.christmasSpecialChallenge, () => BasketItem.ProductId === products.christmasSpecial.id)
+
+            const product = await QuantityModel.findOne({
+              where: { ProductId: BasketItem.ProductId },
+              transaction: t,
+              lock: t.LOCK.UPDATE
+            })
+            if (!product || product.quantity < BasketItem.quantity) {
+              throw new Error(`Insufficient stock for product ${productId}`)
             }
+            await QuantityModel.update(
+              { quantity: product.quantity - BasketItem.quantity },
+              { where: { ProductId: BasketItem.ProductId }, transaction: t }
+            )
+
+            const itemPrice = security.isDeluxe(req) ? deluxePrice : price
+            const itemTotal = itemPrice * BasketItem.quantity
+            const itemBonus = Math.round(itemPrice / 10) * BasketItem.quantity
+
+            basketProducts.push({
+              quantity: BasketItem.quantity,
+              id: productId,
+              name: req.__(name),
+              price: itemPrice,
+              total: itemTotal,
+              bonus: itemBonus
+            })
+
+            totalPrice += itemTotal
+            totalPoints += itemBonus
+
+            doc.text(`${BasketItem.quantity}x ${req.__(name)} ${req.__('ea.')} ${itemPrice} = ${itemTotal}¤`).moveDown()
+          }
+        }
+
+        const discount = calculateApplicableDiscount(basket, req) ?? 0
+        let discountAmount = '0'
+
+        if (discount > 0) {
+          discountAmount = (totalPrice * (discount / 100)).toFixed(2)
+          doc.text(`${discount}% discount from coupon: -${discountAmount}¤`).moveDown()
+          totalPrice -= parseFloat(discountAmount)
+        }
+
+        const deliveryMethod = {
+          deluxePrice: 0,
+          price: 0,
+          eta: 5
+        }
+
+        if (req.body.orderDetails?.deliveryMethodId) {
+          const deliveryMethodFromModel = await DeliveryModel.findOne({
+            where: { id: req.body.orderDetails.deliveryMethodId },
+            transaction: t
+          })
+          if (deliveryMethodFromModel) {
+            deliveryMethod.deluxePrice = deliveryMethodFromModel.deluxePrice
+            deliveryMethod.price = deliveryMethodFromModel.price
+            deliveryMethod.eta = deliveryMethodFromModel.eta
+          }
+        }
+
+        const deliveryAmount = security.isDeluxe(req) ? deliveryMethod.deluxePrice : deliveryMethod.price
+        totalPrice += deliveryAmount
+
+        doc.text(`${req.__('Delivery Price')}: ${deliveryAmount.toFixed(2)}¤`).moveDown()
+        doc.font('Helvetica-Bold').fontSize(20).text(`${req.__('Total Price')}: ${totalPrice.toFixed(2)}¤`).moveDown()
+        doc.font('Helvetica-Bold').fontSize(15).text(`${req.__('Bonus Points Earned')}: ${totalPoints}`).moveDown()
+        doc.font('Times-Roman').fontSize(15).text(`(${req.__('The bonus points from this order will be added 1:1 to your wallet ¤-fund for future purchases!')})`).moveDown().moveDown()
+        doc.font('Times-Roman').fontSize(15).text(req.__('Thank you for your order!'))
+
+        challengeUtils.solveIf(challenges.negativeOrderChallenge, () => totalPrice < 0)
+
+        const userId = req.body.UserId
+        if (userId) {
+          if (req.body.orderDetails?.paymentId === 'wallet') {
+            const wallet = await WalletModel.findOne({
+              where: { UserId: userId },
+              transaction: t,
+              lock: t.LOCK.UPDATE
+            })
+            if (!wallet || wallet.balance < totalPrice) {
+              throw new Error('Insufficient wallet balance.')
+            }
+            await WalletModel.decrement({ balance: totalPrice }, {
+              where: { UserId: userId },
+              transaction: t
+            })
+          }
+          await WalletModel.increment({ balance: totalPoints }, {
+            where: { UserId: userId },
+            transaction: t
+          })
+        }
+
+        await BasketItemModel.destroy({ where: { BasketId: id }, transaction: t })
+        await basket.update({ coupon: null }, { transaction: t })
+
+        await db.ordersCollection.insert({
+          promotionalAmount: discountAmount,
+          paymentId: req.body.orderDetails?.paymentId,
+          addressId: req.body.orderDetails?.addressId,
+          orderId,
+          delivered: false,
+          email: email.replace(/[aeiou]/gi, '*'),
+          totalPrice,
+          products: basketProducts,
+          bonus: totalPoints,
+          deliveryPrice: deliveryAmount,
+          eta: deliveryMethod.eta.toString()
+        })
+
+        fileWriter.on('finish', () => {
+          res.json({ orderConfirmation: orderId })
+        })
+        doc.end()
+      })
+    } catch (err) {
+      next(err)
+    }
+  }
+}
+
           })
           doc.moveDown()
           const discount = calculateApplicableDiscount(basket, req) ?? 0
